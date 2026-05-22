@@ -1,412 +1,1335 @@
-# EDI2: Language Reasoning Model Research Framework
+# Reasoning Layer Evaluation Framework
 
-A research framework for comparing multiple reasoning architectures on a structured question bank. Six reasoning layers wrap a Groq-hosted LLM and answer the same questions using different search and decomposition strategies. An evaluation runner scores predictions against gold answers and produces per-layer statistics.
+A research framework for comparing different reasoning strategies on the same language model, question set, evaluator, and analysis pipeline. The project wraps an OpenRouter chat model with multiple reasoning layers, runs controlled evaluations, saves structured JSON results, and generates publication-oriented visualizations.
 
----
+The current codebase supports six reasoning layers:
 
-## Table of Contents
+- Linear
+- Self-Consistent
+- Tree
+- Graph
+- MCTS
+- Hybrid Tree plus Self-Consistent
 
-1. [Project purpose](#1-project-purpose)
-2. [Repository layout](#2-repository-layout)
-3. [Setup and configuration](#3-setup-and-configuration)
-4. [Reasoning layers](#4-reasoning-layers)
-5. [Evaluation pipeline](#5-evaluation-pipeline)
-6. [Dataset](#6-dataset)
-7. [Running the system](#7-running-the-system)
-8. [Research notes](#8-research-notes)
+The most recent saved run in this workspace is:
 
----
-
-## 1. Project purpose
-
-This project compares six reasoning strategies on the same set of questions using the same underlying LLM. The goal is to understand where each architecture succeeds and fails across problem categories and difficulty tiers.
-
-Core design decisions:
-
-- All layers share a single `BaseLLM` wrapper so token counts and API calls are measured uniformly.
-- Weak heuristic scorers are replaced with LLM-as-judge scoring inside layers that require branch or chain quality assessment.
-- Self-correction mechanisms (contradiction detection, cycle breaking, consistency passes) are built into individual layers rather than applied as a post-processing step.
-- The evaluator supports multiple correctness strategies (numeric tolerance, keyword match, string similarity, LLM judge) so both exact and approximate answers are handled fairly.
-
----
-
-## 2. Repository layout
-
+```text
+eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
 ```
+
+That run used:
+
+```text
+Model: meta-llama/llama-3.3-70b-instruct
+Judge: heuristics
+Questions: 10
+Layers: Linear, Self-Consistent, Tree, Graph
+Flags: --limit 10 --no-mcts --no-hybrid --resume
+```
+
+## Contents
+
+1. [Project Purpose](#project-purpose)
+2. [Repository Layout](#repository-layout)
+3. [Environment Setup](#environment-setup)
+4. [PowerShell Quick Start](#powershell-quick-start)
+5. [Model and API Configuration](#model-and-api-configuration)
+6. [System Architecture](#system-architecture)
+7. [Reasoning Layer Interface](#reasoning-layer-interface)
+8. [Reasoning Layers](#reasoning-layers)
+9. [Evaluation Pipeline](#evaluation-pipeline)
+10. [Dataset](#dataset)
+11. [Current Results](#current-results)
+12. [Analysis and Visualization](#analysis-and-visualization)
+13. [Output Files](#output-files)
+14. [Result JSON Schema](#result-json-schema)
+15. [Manual Error Analysis](#manual-error-analysis)
+16. [Troubleshooting](#troubleshooting)
+17. [Research Extensions](#research-extensions)
+
+## Project Purpose
+
+The purpose of this project is to compare how reasoning architecture changes answer quality, token cost, latency, and failure mode for the same base model.
+
+The framework is built around a controlled experiment:
+
+1. Use a shared question bank from `eval/questions.py`.
+2. Send each question through one or more reasoning layers.
+3. Evaluate each predicted answer against the gold answer.
+4. Save per-layer and per-question metadata to JSON.
+5. Generate visualizations and reports from the saved result file.
+
+This lets the project answer research questions such as:
+
+- Does self-consistency improve accuracy enough to justify its token cost?
+- Does tree search help on multi-step math or does it create noisy branches?
+- Does graph decomposition help on multi-hop questions?
+- Which layer gives the best accuracy per token?
+- Which categories fail most often?
+- Are evaluator scores calibrated with actual correctness?
+- Are observed differences meaningful, or just noise from a small sample?
+
+## Repository Layout
+
+```text
 edi2/
-  base_llm.py                    # Groq client, retry logic, token tracking, per-call model override
-  main.py                        # Run all layers on a single question for inspection
+  .env.example
+  .gitignore
+  base_llm.py
+  main.py
+  README.md
   requirements.txt
+  test_phase1.py
+
   reasoning/
-    base.py                      # Abstract ReasoningLayer interface
-    llm_utils.py                 # Score parsing, answer normalisation for clustering
-    linear.py                    # Sequential chain with contradiction checks, confidence, reflection
-    self_consistent.py           # N independent chains, quality-weighted clustered vote
-    tree.py                      # Beam search with LLM scorer, early exit, UCB tracking
-    graph.py                     # Decomposition, dependency resolution, cycle detection, consistency
-    mcts.py                      # Monte Carlo Tree Search: select, expand, rollout, backpropagate
-    hybrid.py                    # Tree prefix followed by Self-Consistent vote at leaf
+    base.py
+    graph.py
+    hybrid.py
+    linear.py
+    llm_utils.py
+    mcts.py
+    self_consistent.py
+    tree.py
+
   eval/
-    questions.py                 # 55-question bank with category, difficulty, and source fields
-    evaluator.py                 # Correctness strategies: numeric, keyword, form match, LLM judge
-    runner_improved.py           # Benchmark runner with per-layer timing and token tracking
-    results_improved_*.json      # Benchmark output (gitignored)
+    analysis.py
+    check_quota.py
+    evaluator.py
+    questions.py
+    runner_improved.py
+    results_gemini_meta_llama_llama_3_3_70b_instruct.json
+    results_improved_llama_3_3_70b_versatile.json
+
+    figures/
+      analysis_summary.txt
+      confidence_calibration.png
+      efficiency_frontier.png
+      heatmap_layer_category.png
+      statistical_significance.txt
 ```
 
----
+Important files:
 
-## 3. Setup and configuration
+| File | Purpose |
+|---|---|
+| `base_llm.py` | OpenRouter client wrapper, model constants, retries, token accounting, quota errors |
+| `main.py` | Single-question demo that runs all six reasoning layers |
+| `test_phase1.py` | Local validation for imports, evaluator behavior, dataset loading, and optional API call |
+| `reasoning/base.py` | Abstract `ReasoningLayer` interface shared by all layers |
+| `reasoning/linear.py` | Step-by-step reasoning with contradiction checks and reflection |
+| `reasoning/self_consistent.py` | Multiple independent chains with quality-weighted clustered voting |
+| `reasoning/tree.py` | Branching search with LLM scoring and pruning |
+| `reasoning/graph.py` | Sub-question graph decomposition with dependency ordering and consistency checks |
+| `reasoning/mcts.py` | Monte Carlo Tree Search over reasoning steps |
+| `reasoning/hybrid.py` | Tree exploration followed by self-consistent voting |
+| `reasoning/llm_utils.py` | Shared score parsing and answer normalization helpers |
+| `eval/questions.py` | 55-question benchmark dataset |
+| `eval/evaluator.py` | Correctness evaluator using numeric, keyword, form, and optional LLM judge strategies |
+| `eval/runner_improved.py` | Main benchmark runner with resume support |
+| `eval/analysis.py` | Plot and report generator |
 
-### 3.1 Install dependencies
+## Environment Setup
 
-```bash
-pip install -r requirements.txt
+The project is written for Python and uses OpenRouter through the OpenAI-compatible SDK.
+
+Install dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
 ```
 
-Required packages: `groq`, `python-dotenv`, `matplotlib`, `numpy`.
+The dependency file currently includes:
 
-### 3.2 API key
+```text
+openai>=1.40.0
+python-dotenv>=1.0.0
+matplotlib>=3.8.0
+numpy>=1.26.0
+```
 
 Create a `.env` file in the project root:
 
-```
-GROQ_API_KEY=your_key_here
-```
-
-The key is loaded by `base_llm.py` via `python-dotenv`. Never commit `.env` to version control.
-
-### 3.3 Models
-
-Three model constants are defined in `base_llm.py`:
-
-| Constant | Model string | Role |
-|----------|--------------|------|
-| `SMART_MODEL` | `llama-3.3-70b-versatile` | Default reasoning for all layers |
-| `EVAL_MODEL` | `llama-3.1-8b-instant` | Fast rollouts inside MCTS simulations |
-| `JUDGE_MODEL` | `llama-3.1-8b-instant` | Answer correctness judging in evaluator |
-
-`BaseLLM.call(prompt, model=None)` accepts an optional model override. If not provided, `SMART_MODEL` is used. MCTS passes `EVAL_MODEL` during the simulate phase to reduce cost.
-
-### 3.4 Retry policy
-
-`BaseLLM` wraps every call in an exponential backoff loop with up to 6 attempts. It parses Groq rate-limit responses of the form `"try again in Xs"` and waits the specified duration before retrying.
-
----
-
-## 4. Reasoning layers
-
-All layers implement the interface defined in `base.py`:
-
-```python
-def solve(question: str) -> dict
+```text
+OPENROUTER_API_KEY=your_key_here
 ```
 
-The returned dict always contains `answer` (string), `steps` (list of strings), and `stats` (dict with `llm_calls`, `total_tokens`, `model`). Individual layers add extra keys documented below.
+Optional OpenRouter metadata:
 
----
-
-### 4.1 Linear
-
-**File:** `reasoning/linear.py`
-
-**Algorithm:** Generates up to 8 sequential reasoning steps. Each step prompt includes all prior steps as context. Generation stops when the model produces a `Final Answer:` token or the step limit is reached.
-
-**Contradiction detection:** After each new step is generated, a separate LLM call asks whether the new step contradicts any prior step (YES/NO). On YES, the last step is popped and regenerated with a consistency instruction injected into the prompt. This costs one additional LLM call per step when enabled.
-
-**Step confidence:** After each step, a second separate call rates logical validity on a scale of 1 to 10. Scores are stored in `step_scores` and averaged into `avg_confidence` in the return dict.
-
-**Reflection:** A single final-pass call reviews the complete chain and produces a corrected answer if any errors are found. This costs one additional LLM call at the end of the chain.
-
-**Config flags:** `enable_contradiction_check` and `enable_reflection` both default to `True`. Set to `False` to run a baseline with no self-correction.
-
-**Extra return keys:** `step_scores`, `avg_confidence`, `backtrack_count`.
-
----
-
-### 4.2 Self-Consistent
-
-**File:** `reasoning/self_consistent.py`
-
-**Algorithm:** Runs `N_CHAINS = 8` independent full reasoning chains in parallel (sequential API calls). Extracts a short final answer from each chain. Scores each chain's coherence 1 to 10 with an LLM call. Drops chains with quality below 3.0 as outliers. Clusters remaining answers by normalised form (`600`, `600.0`, and `six hundred` all map to `num:600.0`). Selects the cluster whose member chains have the highest summed quality score.
-
-This addresses two weaknesses of basic majority voting: chains with poor reasoning no longer count equally, and formatting variation no longer splits votes across the same answer.
-
-**Extra return keys:** `chains` (list of per-chain dicts with `answer`, `quality`), `clusters` (dict of normalised form to list of answers), `outliers_dropped` (count).
-
----
-
-### 4.3 Tree
-
-**File:** `reasoning/tree.py`
-
-**Algorithm:** Depth-limited beam search over reasoning steps.
-
-At each depth level, the layer generates `BRANCH_COUNT = 3` candidate next steps from the current best state. Each candidate is scored 1 to 10 by an LLM call asking for logical validity and progress toward the answer. The top `TOP_K = 2` candidates are kept and become the parents for the next depth level. Final answers are only accepted from depth `MIN_DEPTH = 3` or deeper.
-
-**LLM scorer:** Replaces the original heuristic scorer (which used step length and keyword presence). The scorer prompt is: "Rate this reasoning step 1 to 10 for logical validity and progress toward the final answer. Respond with a number only."
-
-**Early exit:** If any candidate at any depth scores 8.5 or above and contains `Final Answer:`, the layer returns immediately without exploring further branches. The return dict includes `early_exit: true` and `exit_score`.
-
-**UCB tracking:** Each node stores `visits` and `total_reward` for potential UCB-based selection in future extensions.
-
-**Extra return keys:** `early_exit`, `exit_score`, `tree_structure`.
-
----
-
-### 4.4 Graph
-
-**File:** `reasoning/graph.py`
-
-**Algorithm:**
-
-1. **Decompose:** The LLM breaks the question into 3 to 4 sub-questions (nodes).
-2. **Infer dependencies:** A second call produces a `depends_on` mapping between nodes.
-3. **Cycle detection:** A DFS check identifies any cycles in the dependency graph. Cycles are broken by removing the dependency from the first node encountered in the cycle.
-4. **Topological sort:** Nodes are ordered so each node's dependencies are resolved before it is. Nodes with more dependents are resolved earlier.
-5. **Resolve:** Each node is answered with context from its resolved dependencies injected into the prompt.
-6. **Conclude:** A global conclusion call synthesises the resolved nodes into a final answer. If the conclusion is marked insufficient, one new node is spawned (up to `MAX_NODES = 8`).
-7. **Consistency check:** A final LLM call asks whether the conclusion follows logically from all resolved nodes. On INCONSISTENT, the flagged node IDs are re-resolved.
-
-**Extra return keys:** `graph` (list of resolved node dicts with `id`, `question`, `answer`, `depends_on`), `is_consistent`.
-
----
-
-### 4.5 MCTS
-
-**File:** `reasoning/mcts.py`
-
-**Algorithm:** Monte Carlo Tree Search over reasoning steps. Each node in the tree represents one reasoning step. Default `num_iterations = 12` (runner uses 10).
-
-| Phase | Action |
-|-------|--------|
-| Select | Walk from root, at each node choose the child with the highest UCB score until an unvisited node or leaf is reached |
-| Expand | Generate `K = 2` child reasoning steps from the current node using `SMART_MODEL` |
-| Simulate | Roll out from the expanded child to a final answer or max depth using `EVAL_MODEL` (cheaper) |
-| Score | LLM rates the rollout answer's validity 1 to 10; reward = score / 10 |
-| Backpropagate | Add reward to `total_reward` and increment `visits` for each node on the path to root |
-
-UCB formula: `(total_reward / visits) + C * sqrt(ln(parent_visits) / visits)` where `C = 1.41`.
-
-Final answer is taken from the rollout with the highest reward. The returned steps follow the most-visited path from root to leaf.
-
-**Extra return keys:** `mcts_log`, `best_reward`, `nodes_explored`, `iterations`.
-
----
-
-### 4.6 Hybrid
-
-**File:** `reasoning/hybrid.py`
-
-**Algorithm:**
-
-1. Run Tree with reduced parameters (depth 3, 2 branches, top-1 kept) to produce a strong reasoning prefix.
-2. Run 4 to 5 Self-Consistent chains that begin from the Tree prefix rather than from the raw question.
-3. Apply weighted clustered vote (same mechanism as Self-Consistent) to the chains' final answers.
-
-The Tree phase provides a high-quality starting point; the Self-Consistent phase adds robustness against single-chain errors.
-
-**Extra return keys:** `tree_prefix`, `chains`, `clusters`.
-
----
-
-## 5. Evaluation pipeline
-
-### 5.1 Correctness strategies
-
-`eval/evaluator.py` applies strategies in order and returns the first match:
-
-1. **numeric_tolerance:** Extracts the first number from both prediction and expected answer. Correct if within 1% relative tolerance or 0.01 absolute tolerance.
-2. **keyword_match:** Tokenises the expected answer. Correct if 80% or more of expected keywords appear in the prediction.
-3. **form_variation:** Normalises both strings (lowercase, strip punctuation, collapse whitespace). Correct if normalised similarity exceeds 0.85.
-4. **llm_judge:** If `--judge` flag is set, sends both strings to `JUDGE_MODEL` for a 0 to 100 correctness score. Correct if score >= 75.
-
-The `strategy` field in results JSON records which strategy produced the verdict.
-
-### 5.2 Runner
-
-**File:** `eval/runner_improved.py`
-
-The runner iterates over all questions and all layers, calls `layer.solve(question)`, passes the answer to the evaluator, and writes per-question results to a JSON file. A 2-second delay is inserted between layer runs on the same question to stay within Groq rate limits.
-
-**CLI flags:**
-
-```bash
-# Full benchmark, all 55 questions, all 6 layers
-python eval/runner_improved.py
-
-# Use EVAL_MODEL for all layers, first 10 questions only
-python eval/runner_improved.py --fast --limit 10
-
-# Skip MCTS and Hybrid (fastest benchmark)
-python eval/runner_improved.py --no-mcts --no-hybrid
-
-# Reduce MCTS iterations
-python eval/runner_improved.py --mcts-iters 6
-
-# Filter by category or difficulty
-python eval/runner_improved.py --category Math --difficulty easy
-
-# Enable LLM judge for open-ended answers
-python eval/runner_improved.py --judge
+```text
+OPENROUTER_REFERER=http://localhost
+OPENROUTER_APP_NAME=edi2-reasoning
 ```
 
-**Output file:** `eval/results_improved_<model>.json`
+The API key is read with `dotenv` through `find_dotenv()`, so commands can be run from the project root without manually exporting environment variables.
 
-**Per-question fields in results:**
+## PowerShell Quick Start
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `answer` | string | Model output or ERROR string |
-| `correct` | boolean | Verdict from evaluator |
-| `score` | float | Evaluator confidence (0 to 1) |
-| `strategy` | string | Which correctness strategy matched |
-| `tokens` | integer | Total tokens consumed for this solve |
-| `calls` | integer | Number of LLM API calls |
-| `time_s` | float | Wall clock seconds |
-| `category` | string | Question category |
-| `difficulty` | string | easy, medium, or hard |
+All commands below assume the working directory is:
 
----
+```powershell
+cd "C:\Users\AARUSHI TANDON\OneDrive\Python\edi2"
+```
 
-## 6. Dataset
+Install dependencies:
 
-**File:** `eval/questions.py`
+```powershell
+python -m pip install -r requirements.txt
+```
 
-55 questions across five categories and three difficulty tiers.
+Run local validation:
 
-| Category | Total | Easy | Medium | Hard |
-|----------|-------|------|--------|------|
-| Math | 22 | 5 | 12 | 5 |
-| Logic | 9 | 2 | 4 | 3 |
-| Multi-hop | 7 | 1 | 4 | 2 |
-| Probability | 6 | 2 | 3 | 1 |
-| Adversarial | 6 | 1 | 3 | 2 |
-
-Each question record contains: `id`, `category`, `difficulty`, `question`, `answer`, `source`.
-
-The `source` field tags where each question style originates: `original`, `gsm8k-style`, `strategyqa-style`, `logiqa-style`, `adversarial`, or `trick`. Questions are style-aligned with published benchmarks, not direct copies from benchmark test splits.
-
-Selected examples:
-
-| ID | Category | Difficulty | Question summary | Expected answer |
-|----|----------|------------|-----------------|-----------------|
-| Q0 | Math | medium | Tank 3/5 full, add 120L, becomes 4/5. Capacity? | 600 |
-| Q7 | Adversarial | hard | Bat and ball cost $1.10. Bat costs $1 more. Ball costs? | 0.05 |
-| Q43 | Adversarial | easy | How many animals did Moses take on the ark? | none |
-
-To expand the dataset, add rows to the `QUESTIONS` list in `eval/questions.py` following the same schema.
-
----
-
-## 7. Running the system
-
-### Step 1: Validate imports locally
-
-```bash
+```powershell
 python test_phase1.py
 ```
 
-Checks that all modules import correctly and that the numeric and form-match evaluator strategies work without an API call.
+Run the single-question demo:
 
-### Step 2: Smoke test on one question
-
-```bash
+```powershell
 python main.py
 ```
 
-Runs all six layers on `QUESTIONS[0]` and prints truncated steps, final answer, and stats per layer. To test a different question, change the index on the `QUESTIONS[n]` line in `main.py`.
+Run the same 10-question evaluation that produced the current saved results:
 
-### Step 3: Benchmark a subset
-
-```bash
-python eval/runner_improved.py --limit 10 --fast
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid --resume
 ```
 
-### Step 4: Full benchmark
+Run analysis for the current saved result file:
 
-```bash
+```powershell
+python eval/analysis.py --results eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
+```
+
+Open the generated files:
+
+```powershell
+Get-ChildItem eval\figures
+```
+
+If `python eval/analysis.py` is run without `--results`, it looks for the default file:
+
+```text
+eval/results_improved.json
+```
+
+If that file does not exist, pass the actual saved result file explicitly:
+
+```powershell
+python eval/analysis.py --results eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
+```
+
+## Model and API Configuration
+
+Model constants live in `base_llm.py`.
+
+| Constant | Value | Used for |
+|---|---|---|
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible API endpoint |
+| `SMART_MODEL` | `meta-llama/llama-3.3-70b-instruct` | Default reasoning model |
+| `EVAL_MODEL` | `meta-llama/llama-3.1-8b-instruct` | Fast model, MCTS rollout, MCTS expansion |
+| `JUDGE_MODEL` | `meta-llama/llama-3.1-8b-instruct` | Optional LLM-as-judge |
+| `ACTIVE_MODEL` | `SMART_MODEL` | Default model for `BaseLLM` |
+| `TEMPERATURE` | `0.7` | Default generation temperature |
+| `JUDGE_TEMP` | `0.3` | Lower temperature for judge scoring |
+| `MAX_TOKENS` | `1024` | Maximum tokens per completion |
+| `MAX_RETRIES` | `6` | Retry attempts for recoverable API failures |
+| `BACKOFF_BASE` | `2` | Exponential backoff base |
+| `MAX_WAIT_SECONDS` | `90` | Maximum wait between retries |
+
+`BaseLLM.call(prompt, model=None)` performs one chat completion. If `model` is passed, the call uses that model for only that request. This is how MCTS can use a cheaper model for expansion and rollout while the main experiment still has a primary model.
+
+`BaseLLM` tracks:
+
+- `call_count`
+- `token_count`
+- `raw_outputs`
+- `model_name`
+
+Each reasoning layer calls `self.llm.reset_stats()` at the start of `solve()`, so the result stats describe that one solve call.
+
+Quota and rate-limit handling:
+
+- Authentication errors are surfaced immediately.
+- Quota, credit, daily token, and 429-style errors raise `LLMQuotaExceeded`.
+- Recoverable errors retry with exponential backoff.
+- The runner checkpoints after every layer-question pair, so partial work is preserved.
+
+## System Architecture
+
+The runtime flow is:
+
+```text
+Question bank
+  |
+  v
+eval/runner_improved.py
+  |
+  +-- builds BaseLLM
+  +-- builds selected reasoning layers
+  +-- sends each question to each layer
+  +-- evaluates each answer with CorrectnesEvaluator
+  +-- saves checkpoint JSON after each completed run
+  |
+  v
+eval/results_*.json
+  |
+  v
+eval/analysis.py
+  |
+  +-- heatmap_layer_category.png
+  +-- efficiency_frontier.png
+  +-- confidence_calibration.png
+  +-- statistical_significance.txt
+  +-- analysis_summary.txt
+```
+
+The project separates four concerns:
+
+| Concern | Module |
+|---|---|
+| Model transport and retry logic | `base_llm.py` |
+| Reasoning strategy | `reasoning/*.py` |
+| Correctness scoring | `eval/evaluator.py` |
+| Research reporting | `eval/analysis.py` |
+
+This separation makes it possible to compare layers without changing the dataset, model wrapper, or evaluator.
+
+## Reasoning Layer Interface
+
+All reasoning layers inherit from `ReasoningLayer` in `reasoning/base.py`.
+
+Every layer implements:
+
+```python
+solve(question: str) -> dict
+```
+
+Every returned dictionary must include at least:
+
+```python
+{
+    "answer": str,
+    "steps": list[str],
+    "stats": {
+        "llm_calls": int,
+        "total_tokens": int,
+        "model": str,
+    },
+}
+```
+
+Shared helper methods:
+
+| Method | Purpose |
+|---|---|
+| `_build_step_prompt(question, steps_so_far)` | Creates a step-by-step prompt containing prior reasoning |
+| `_extract_final_answer(text)` | Extracts text after `Final Answer:` |
+
+The runner relies on the common return structure to collect tokens, calls, wall-clock time, and final answers in a uniform way.
+
+## Reasoning Layers
+
+### Linear
+
+File:
+
+```text
+reasoning/linear.py
+```
+
+Default constants:
+
+```text
+MAX_STEPS = 8
+enable_contradiction_check = True
+enable_reflection = True
+```
+
+Linear reasoning generates one step at a time. Each new prompt includes the question and all previously accepted steps.
+
+For each generated step:
+
+1. The layer asks the model for the next reasoning step.
+2. If previous steps exist, it checks whether the new step contradicts them.
+3. If a contradiction is detected, it removes the previous step and retries with consistency guidance.
+4. It asks the model to score the step's logical validity from 1 to 10.
+5. It stops early if the step contains `Final Answer:`.
+6. At the end, it performs a reflection pass that can correct the final answer.
+
+Extra outputs:
+
+| Field | Meaning |
+|---|---|
+| `step_scores` | Per-step confidence scores from 1 to 10 |
+| `avg_confidence` | Mean of `step_scores` |
+| `backtrack_count` | Number of contradiction-triggered backtracks |
+
+Strengths:
+
+- Simple and easy to inspect.
+- Lower cost than ensemble methods.
+- Reflection can catch some local mistakes.
+
+Weaknesses:
+
+- Early mistakes can influence later steps.
+- Contradiction checking adds extra calls.
+- It explores only one reasoning path.
+
+### Self-Consistent
+
+File:
+
+```text
+reasoning/self_consistent.py
+```
+
+Default constants:
+
+```text
+N_CHAINS = 8
+OUTLIER_QUALITY_THRESHOLD = 3.0
+```
+
+Self-Consistent reasoning generates multiple independent answers, scores each chain, removes low-quality outliers, clusters answer variants, and selects the strongest answer cluster.
+
+Pipeline:
+
+1. Generate `N_CHAINS` independent reasoning chains.
+2. For each chain, ask the model to extract only the final answer.
+3. Ask the model to score the chain's logical coherence from 1 to 10.
+4. Drop chains with quality score below `3.0`.
+5. Normalize answers for clustering.
+6. Cluster answers with string similarity threshold `0.85`.
+7. Select the cluster with the highest total quality score.
+
+Answer normalization is implemented in `reasoning/llm_utils.py`.
+
+It handles:
+
+- Case normalization
+- Punctuation cleanup
+- Number extraction
+- Fraction conversion
+- Number words such as `six hundred`
+
+Extra outputs:
+
+| Field | Meaning |
+|---|---|
+| `chains` | All generated chains, extracted answers, and quality scores |
+| `clusters` | Grouped answers with weights |
+| `outliers_dropped` | Number of low-quality chains excluded from voting |
+
+Strengths:
+
+- Reduces dependence on one sample.
+- Can recover when some chains fail.
+- Useful for math and short-answer questions where answer clustering is meaningful.
+
+Weaknesses:
+
+- High token cost.
+- All chains can share the same misconception.
+- Requires answer extraction and clustering to behave well.
+
+### Tree
+
+File:
+
+```text
+reasoning/tree.py
+```
+
+Default constants:
+
+```text
+MAX_DEPTH = 4
+BRANCH_COUNT = 3
+TOP_K = 2
+MIN_DEPTH = 3
+EARLY_EXIT_THRESHOLD = 8.5
+UCB_C = 1.41
+```
+
+Tree reasoning explores multiple candidate next steps at each depth.
+
+Pipeline:
+
+1. Start with one empty branch.
+2. At each depth, ask the model to generate `BRANCH_COUNT` different next-step options.
+3. Score every candidate from 1 to 10 for logical validity and progress.
+4. Keep the top `TOP_K` candidates by cumulative score.
+5. After `MIN_DEPTH`, allow candidates to include `Final Answer:`.
+6. If a candidate has score at least `8.5` and contains a final answer, return it immediately.
+7. If no final answer is found, use the best surviving branch for a fallback final-answer prompt.
+
+Extra outputs:
+
+| Field | Meaning |
+|---|---|
+| `early_exit` | Whether the layer returned during high-confidence branch expansion |
+| `exit_score` | Score that caused early exit, when applicable |
+| `tree_structure` | Placeholder structure for future visualization |
+
+Strengths:
+
+- Explores alternatives rather than committing to one path.
+- Can prune weaker branches.
+- Provides branch-level scores for analysis.
+
+Weaknesses:
+
+- Branch generation and scoring are expensive.
+- LLM self-scoring can prefer plausible wrong steps.
+- The current runner saves final result metadata, not full branch structures.
+
+### Graph
+
+File:
+
+```text
+reasoning/graph.py
+```
+
+Default constant:
+
+```text
+MAX_NODES = 8
+```
+
+Graph reasoning decomposes the original question into atomic sub-questions, infers dependencies between them, resolves the dependency graph, and checks consistency.
+
+Pipeline:
+
+1. Decompose the problem into 3 to 4 nodes.
+2. Ask the model which node IDs depend on which other node IDs.
+3. Detect cycles using DFS.
+4. Break cycles by removing cycle-internal dependencies from one node.
+5. Topologically order nodes.
+6. Prioritize high fan-in nodes when possible.
+7. Resolve nodes using answers from dependencies as context.
+8. Ask whether the resolved facts are enough to answer the original question.
+9. If not enough, generate one new needed sub-question.
+10. Stop when a final answer is available or `MAX_NODES` is reached.
+11. Run a consistency validation pass.
+12. If problem nodes are identified, re-resolve them.
+13. If no final answer exists, run a fallback final-answer prompt using all facts.
+
+Extra outputs:
+
+| Field | Meaning |
+|---|---|
+| `graph` | List of resolved node dictionaries |
+| `is_consistent` | Result of the consistency validation pass |
+
+Strengths:
+
+- Good fit for multi-hop reasoning.
+- Makes intermediate facts explicit.
+- Can identify dependency issues and re-resolve nodes.
+
+Weaknesses:
+
+- Dependency inference is itself model-generated.
+- Decomposition can introduce unnecessary or wrong sub-questions.
+- Current consistency validation is still an LLM judgment.
+
+### MCTS
+
+File:
+
+```text
+reasoning/mcts.py
+```
+
+Default constants:
+
+```text
+DEFAULT_ITERATIONS = 4
+DEFAULT_EXPAND_K = 2
+UCB_C = 1.41
+max_depth = 8
+rollout_model = EVAL_MODEL
+expand_model = EVAL_MODEL
+```
+
+MCTS stands for Monte Carlo Tree Search. This layer treats reasoning steps as nodes in a search tree.
+
+Each iteration follows:
+
+1. Select a leaf using UCB.
+2. Expand the leaf by generating `expand_k` candidate next steps.
+3. Simulate from one expanded child using the rollout model.
+4. Extract or produce a final answer.
+5. Score the rollout from 1 to 10.
+6. Convert the score to reward from 0.0 to 1.0.
+7. Backpropagate the reward through parent nodes.
+
+The UCB formula balances exploitation and exploration:
+
+```text
+ucb = average_reward + c * sqrt(log(parent_visits + 1) / visits)
+```
+
+Extra outputs:
+
+| Field | Meaning |
+|---|---|
+| `mcts_log` | Per-iteration depth, reward, and answer trace |
+| `best_reward` | Highest rollout reward observed |
+| `iterations` | Number of MCTS iterations |
+| `nodes_explored` | Count of nodes in the search tree |
+
+Strengths:
+
+- Formal exploration and exploitation mechanism.
+- Can use a cheaper model for rollout and expansion.
+- Produces useful search metadata.
+
+Weaknesses:
+
+- High cost as iterations increase.
+- Reward is still model-scored rather than ground-truth scored during inference.
+- Not included in the current 10-question saved run because it was skipped with `--no-mcts`.
+
+### Hybrid
+
+File:
+
+```text
+reasoning/hybrid.py
+```
+
+Default parameters:
+
+```text
+tree_depth = 3
+n_chains = 5
+branch_count = 2
+```
+
+The runner currently builds Hybrid with:
+
+```text
+n_chains = 4
+```
+
+Hybrid combines Tree and Self-Consistent reasoning.
+
+Pipeline:
+
+1. Run a shallow Tree search.
+2. Extract the best tree prefix.
+3. Generate several independent continuation chains from that prefix.
+4. Extract final answers.
+5. Score chain quality.
+6. Cluster answers.
+7. Select the highest-weighted answer cluster.
+
+Extra outputs:
+
+| Field | Meaning |
+|---|---|
+| `tree_answer` | Answer produced by the Tree phase |
+| `chains` | Continuation chains from the selected prefix |
+| `clusters` | Weighted answer clusters |
+
+Strengths:
+
+- Uses Tree search to find a promising prefix.
+- Uses voting to reduce single-path fragility.
+- Useful as a high-cost, high-robustness layer.
+
+Weaknesses:
+
+- Usually the most expensive layer.
+- If the tree prefix is bad, all continuation chains inherit that context.
+- Not included in the current 10-question saved run because it was skipped with `--no-hybrid`.
+
+## Evaluation Pipeline
+
+The main evaluation script is:
+
+```text
+eval/runner_improved.py
+```
+
+Basic command:
+
+```powershell
 python eval/runner_improved.py
 ```
 
-### Step 5: Benchmark without expensive layers
+Important flags:
 
-```bash
-python eval/runner_improved.py --no-mcts --no-hybrid
+| Flag | Purpose |
+|---|---|
+| `--model <model>` | Use a specific OpenRouter model |
+| `--fast` | Use `EVAL_MODEL` for all layers |
+| `--judge` | Enable LLM-as-judge correctness scoring |
+| `--limit <n>` | Run only the first `n` filtered questions |
+| `--category <name>` | Filter questions by category |
+| `--difficulty <level>` | Filter questions by difficulty |
+| `--no-mcts` | Skip the MCTS layer |
+| `--no-hybrid` | Skip the Hybrid layer |
+| `--mcts-iters <n>` | Set MCTS iterations |
+| `--output <path>` | Save results to a custom file |
+| `--resume` | Load existing JSON and skip completed layer-question pairs |
+
+Examples:
+
+Run first 10 questions without MCTS or Hybrid:
+
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid
 ```
 
----
+Resume the same run:
 
-## 8. Research notes
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid --resume
+```
 
-### 8.1 Token cost by layer
+Run only math questions:
 
-| Layer | Relative cost | Notes |
-|-------|---------------|-------|
-| Linear | Medium | +2 LLM calls per step when checks are enabled |
-| Self-Consistent | High | 8 chains plus 8 quality scores plus 8 answer extractions |
-| Tree | High | 3 branches x depth x 1 score call each |
-| Graph | Medium-High | Decompose, dependency inference, consistency check |
-| MCTS | Very high | iterations x (expand call + rollout call + score call) |
-| Hybrid | Highest | Full Tree run followed by partial Self-Consistent |
+```powershell
+python eval/runner_improved.py --category Math --no-mcts --no-hybrid
+```
 
-Use `--limit` and `--fast` during development to avoid exhausting API quota.
+Run only hard questions:
 
-### 8.2 Disabling self-correction in Linear
+```powershell
+python eval/runner_improved.py --difficulty hard --no-mcts --no-hybrid
+```
 
-To isolate the contribution of contradiction detection and reflection, set both flags to `False` in `linear.py` or pass config on construction:
+Use the fast model:
+
+```powershell
+python eval/runner_improved.py --fast --limit 10 --no-mcts --no-hybrid
+```
+
+Use LLM judge scoring:
+
+```powershell
+python eval/runner_improved.py --limit 10 --judge --no-mcts --no-hybrid
+```
+
+Run all six layers with a small MCTS budget:
+
+```powershell
+python eval/runner_improved.py --limit 10 --mcts-iters 4
+```
+
+Save to a custom file:
+
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid --output eval/my_run.json
+```
+
+The runner saves after every completed layer-question pair. This is important because long runs can hit rate limits. If a run stops, use the same command with `--resume`.
+
+## Correctness Evaluation
+
+Correctness is handled by `CorrectnesEvaluator` in `eval/evaluator.py`.
+
+The evaluator applies strategies in this order:
+
+1. Numeric tolerance
+2. Keyword match
+3. Form variation
+4. Optional LLM judge
+5. Keyword fallback
+
+### Numeric Tolerance
+
+The evaluator extracts the first number from the predicted answer and the first number from the expected answer.
+
+Tolerance:
+
+```text
+max(abs(expected) * 0.01, 0.01)
+```
+
+This means numeric answers can be within 1 percent, or within 0.01 for very small values.
+
+Example:
+
+```text
+Predicted: 6331
+Expected: 6341
+Tolerance: 63.41
+Result: correct
+```
+
+### Keyword Match
+
+The evaluator lowercases both strings, splits the expected answer into keywords longer than two characters, and checks how many expected keywords appear in the prediction.
+
+Threshold:
+
+```text
+correct if score >= 0.8
+```
+
+This is useful for short logic answers but can be fragile for paraphrases.
+
+### Form Variation
+
+The evaluator normalizes answer forms by:
+
+- Lowercasing
+- Normalizing whitespace
+- Treating separators similarly
+- Removing common stopwords
+- Comparing simple string similarity
+
+Threshold:
+
+```text
+correct if score > 0.85
+```
+
+### LLM Judge
+
+The LLM judge is used only when `--judge` is passed.
+
+It prompts the judge model with:
+
+- Original question
+- Category
+- Expected answer
+- Predicted answer
+
+The judge returns:
+
+```text
+SCORE: <number>
+REASON: <brief explanation>
+```
+
+The runner treats the answer as correct when:
+
+```text
+score >= 0.75
+```
+
+## Dataset
+
+The benchmark dataset is defined in:
+
+```text
+eval/questions.py
+```
+
+Total questions:
+
+```text
+55
+```
+
+Each question has:
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable ID such as `Q0` |
+| `category` | Problem category |
+| `difficulty` | `easy`, `medium`, or `hard` |
+| `question` | Natural-language prompt |
+| `answer` | Gold answer |
+| `source` | Source or style tag |
+
+Category counts:
+
+| Category | Count |
+|---|---:|
+| Math | 24 |
+| Logic | 10 |
+| Multi-hop | 7 |
+| Adversarial | 7 |
+| Probability | 7 |
+
+Difficulty counts:
+
+| Difficulty | Count |
+|---|---:|
+| Easy | 11 |
+| Medium | 30 |
+| Hard | 14 |
+
+Category by difficulty:
+
+| Category | Easy | Medium | Hard | Total |
+|---|---:|---:|---:|---:|
+| Math | 5 | 13 | 6 | 24 |
+| Logic | 2 | 6 | 2 | 10 |
+| Multi-hop | 1 | 4 | 2 | 7 |
+| Adversarial | 1 | 3 | 3 | 7 |
+| Probability | 2 | 4 | 1 | 7 |
+
+Example questions:
+
+| ID | Category | Difficulty | Answer |
+|---|---|---|---|
+| Q0 | Math | medium | `600` |
+| Q1 | Math | medium | `6341` |
+| Q2 | Math | medium | `15` |
+| Q7 | Adversarial | hard | `$0.05` |
+
+To add questions, append dictionaries to `QUESTIONS` using the same schema.
+
+## Current Results
+
+The current saved result file is:
+
+```text
+eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
+```
+
+It was produced by a 10-question run with MCTS and Hybrid skipped:
+
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid --resume
+```
+
+Accuracy summary:
+
+| Layer | Correct | Accuracy | Total Tokens | Avg Tokens per Question | Total Time | Avg Time per Question |
+|---|---:|---:|---:|---:|---:|---:|
+| Linear | 8/10 | 80.0% | 17,583 | 1,758 | 226.0s | 22.6s |
+| Self-Consistent | 7/10 | 70.0% | 74,456 | 7,446 | 1000.9s | 100.1s |
+| Tree | 5/10 | 50.0% | 39,996 | 4,000 | 461.5s | 46.1s |
+| Graph | 7/10 | 70.0% | 57,206 | 5,721 | 1204.3s | 120.4s |
+
+Per-category correctness in the current 10-question run:
+
+| Layer | Adversarial | Logic | Math | Multi-hop | Probability |
+|---|---:|---:|---:|---:|---:|
+| Linear | 1/1 | 2/2 | 4/5 | 1/1 | 0/1 |
+| Self-Consistent | 1/1 | 2/2 | 3/5 | 1/1 | 0/1 |
+| Tree | 1/1 | 2/2 | 1/5 | 1/1 | 0/1 |
+| Graph | 1/1 | 2/2 | 3/5 | 1/1 | 0/1 |
+
+Observed from this run:
+
+- Linear had the highest accuracy and lowest token cost among the four tested layers.
+- Self-Consistent and Graph tied on accuracy, but Self-Consistent used fewer total seconds than Graph in this run.
+- Tree performed poorly on the math subset in this specific sample.
+- All layers failed Q9, the probability question.
+- All layers failed Q8, the train timing question.
+- The sample is small, so confidence intervals are wide.
+
+## Analysis and Visualization
+
+The analysis script is:
+
+```text
+eval/analysis.py
+```
+
+Run analysis for the current saved result file:
+
+```powershell
+python eval/analysis.py --results eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
+```
+
+Generated files:
+
+```text
+eval/figures/heatmap_layer_category.png
+eval/figures/efficiency_frontier.png
+eval/figures/confidence_calibration.png
+eval/figures/statistical_significance.txt
+eval/figures/analysis_summary.txt
+```
+
+### Accuracy Heatmap
+
+Path:
+
+```text
+eval/figures/heatmap_layer_category.png
+```
+
+Rendered figure:
+
+![Layer by category accuracy heatmap](eval/figures/heatmap_layer_category.png)
+
+What it shows:
+
+- Rows are reasoning layers.
+- Columns are problem categories.
+- Each cell is accuracy percentage.
+- The color scale runs from low accuracy to high accuracy.
+
+Technical source:
+
+```text
+plot_heatmap(results, out_path)
+```
+
+The function reads the result JSON, groups by layer and question category, computes percent correct, and saves a PNG with `matplotlib`.
+
+### Token Efficiency Frontier
+
+Path:
+
+```text
+eval/figures/efficiency_frontier.png
+```
+
+Rendered figure:
+
+![Token efficiency frontier](eval/figures/efficiency_frontier.png)
+
+What it shows:
+
+- X-axis is average tokens per question.
+- Y-axis is accuracy percentage.
+- Each point is one reasoning layer.
+- Better layers appear toward the upper-left: higher accuracy and lower token cost.
+
+Technical source:
+
+```text
+plot_efficiency_frontier(results, out_path)
+```
+
+The function sums tokens and correctness for each layer, computes average tokens per question, and plots accuracy against cost.
+
+### Confidence Calibration
+
+Path:
+
+```text
+eval/figures/confidence_calibration.png
+```
+
+Rendered figure:
+
+![Confidence calibration](eval/figures/confidence_calibration.png)
+
+What it shows:
+
+- Each subplot is one layer.
+- X-axis is evaluator score bin.
+- Y-axis is actual correctness.
+- The dashed diagonal is ideal calibration.
+
+Technical source:
+
+```text
+plot_confidence_calibration(results, out_path)
+```
+
+The current evaluator often outputs scores near 0 or 1 for heuristic matches, so this plot is most informative when there are more examples and when `--judge` is used.
+
+### Statistical Significance Report
+
+Path:
+
+```text
+eval/figures/statistical_significance.txt
+```
+
+Current report summary:
+
+```text
+Graph                70.0%  [95% CI: 41.6% - 98.4%]  (7/10)
+Linear               80.0%  [95% CI: 55.2% - 104.8%]  (8/10)
+Self-Consistent      70.0%  [95% CI: 41.6% - 98.4%]  (7/10)
+Tree                 50.0%  [95% CI: 19.0% - 81.0%]  (5/10)
+```
+
+The current implementation uses a normal approximation:
+
+```text
+p +/- 1.96 * sqrt(p * (1 - p) / n)
+```
+
+Because `n = 10`, the intervals are very wide. Some upper bounds can exceed 100 percent because the current script does not clamp the interval to `[0, 100]`.
+
+### Analysis Summary
+
+Path:
+
+```text
+eval/figures/analysis_summary.txt
+```
+
+This file lists generated figures and includes the beginning of the statistical report.
+
+## Output Files
+
+### Evaluation Result Files
+
+The runner default output name is based on the model:
 
 ```python
-layer = Linear(llm, enable_contradiction_check=False, enable_reflection=False)
+safe = model.replace(".", "_").replace("-", "_").replace("/", "_")
+return f"eval/results_gemini_{safe}.json"
 ```
 
-This produces a clean baseline matching the original single-pass chain behaviour.
+For the default model:
 
-### 8.3 Extending the dataset
-
-The dataset is designed to grow toward 100 questions. Add entries to `QUESTIONS` in `eval/questions.py`. Maintain the `source` field accurately, especially for any questions derived from GSM8K, StrategyQA, or LogiQA, so benchmark provenance is clear in any write-up.
-
-### 8.4 Adding a chi-square significance test
-
-If `scipy` is available, add the following to the analysis script to test whether layer accuracy differences are statistically significant beyond the binomial confidence intervals:
-
-```python
-from scipy.stats import chi2_contingency
-# Build a 2 x N contingency table: [correct_counts], [incorrect_counts] per layer
-# chi2_contingency returns (chi2, p, dof, expected)
+```text
+meta-llama/llama-3.3-70b-instruct
 ```
 
-A p-value below 0.05 with 55 questions and the expected accuracy spread should be achievable for the largest observed differences.
+The output path becomes:
 
-### 8.5 Saving tree and graph structures for path visualisation
-
-Tree and Graph layers return `tree_structure` and `graph` keys in their solve dicts. To plot these, modify `runner_improved.py` to persist these fields in the results JSON alongside the standard fields, then use NetworkX to build and render the graph:
-
-```python
-import networkx as nx
-G = nx.DiGraph()
-for node in result["graph"]:
-    G.add_node(node["id"], label=node["question"][:40])
-    for dep in node["depends_on"]:
-        G.add_edge(dep, node["id"])
-nx.draw(G, with_labels=True)
+```text
+eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
 ```
 
----
+### Figure Files
 
-## Quick reference
+All analysis outputs are written to:
 
-| Task | Command |
-|------|---------|
-| Install | `pip install -r requirements.txt` |
-| Single question demo | `python main.py` |
-| Benchmark 55 questions | `python eval/runner_improved.py` |
-| Benchmark without MCTS | `python eval/runner_improved.py --no-mcts --no-hybrid` |
-| Math category only | `python eval/runner_improved.py --category Math` |
-| Hard questions only | `python eval/runner_improved.py --difficulty hard` |
-| Fast dev run | `python eval/runner_improved.py --limit 10 --fast` |
+```text
+eval/figures/
+```
 
----
+The plot files are overwritten each time `eval/analysis.py` runs.
 
-## License
+## Result JSON Schema
 
-Academic and research use. Set `GROQ_API_KEY` in `.env` and ensure it is listed in `.gitignore` before pushing.
+The saved JSON is keyed by layer name, then question ID.
+
+Structure:
+
+```json
+{
+  "Linear": {
+    "Q0": {
+      "answer": "600",
+      "correct": true,
+      "score": 1.0,
+      "confidence": "high",
+      "strategy": "numeric_tolerance",
+      "reason": "Numeric match: 600.0 vs 600.0 (tolerance: ...)",
+      "tokens": 1863,
+      "calls": 6,
+      "time_s": 18.4,
+      "category": "Math",
+      "difficulty": "medium"
+    }
+  }
+}
+```
+
+Field meanings:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `answer` | string | Final answer returned by the reasoning layer, truncated to 200 chars by the runner |
+| `correct` | boolean | Evaluator correctness result |
+| `score` | float | Evaluator score from 0.0 to 1.0 |
+| `confidence` | string | Evaluator confidence label |
+| `strategy` | string | Evaluation strategy used |
+| `reason` | string | Short explanation from evaluator |
+| `tokens` | integer | Total tokens recorded by `BaseLLM` for this solve |
+| `calls` | integer | Number of LLM calls for this solve |
+| `time_s` | float | Wall-clock solve time in seconds |
+| `category` | string | Question category |
+| `difficulty` | string | Question difficulty |
+
+Note that the result JSON currently stores evaluation metadata but not the complete layer internals. For example, Tree returns `tree_structure` from `solve()`, and Graph returns `graph`, but `runner_improved.py` does not currently save those full fields in the final JSON.
+
+## Manual Error Analysis
+
+The project already generates aggregate plots, but manual error analysis is still needed for research-quality interpretation.
+
+Recommended process:
+
+1. Open the result JSON.
+2. For each layer, find entries where `correct` is `false`.
+3. Read the original question from `eval/questions.py`.
+4. Compare the predicted answer with the gold answer.
+5. Assign a failure category.
+
+Suggested failure categories:
+
+| Category | Description |
+|---|---|
+| Arithmetic error | Reasoning structure was right, calculation was wrong |
+| Algebra setup error | Equation or rate relationship was built incorrectly |
+| Misread prompt | Model ignored or changed a condition |
+| Premature final answer | Model stopped before enough information was derived |
+| Bad branch selection | Tree or MCTS selected a plausible but wrong path |
+| Bad decomposition | Graph created unhelpful or wrong sub-questions |
+| Dependency error | Graph resolved nodes in a poor dependency order |
+| Voting collapse | Self-Consistent chains agreed on the same wrong answer |
+| Evaluator issue | Prediction may be valid, but heuristic scoring failed |
+| Formatting issue | Answer was right but not in a form the evaluator recognized |
+
+For the current 10-question run, good first targets are:
+
+| Question | Notes |
+|---|---|
+| Q8 | All four tested layers were wrong on the train timing problem |
+| Q9 | All four tested layers gave `31/105` for the probability problem |
+| Q6 | Tree and Graph failed while Linear and Self-Consistent passed |
+| Q1 | Self-Consistent and Tree failed while Linear and Graph passed |
+| Q2 | Tree failed while the other three tested layers passed |
+
+## Troubleshooting
+
+### Analysis says results file was not found
+
+If this command is run:
+
+```powershell
+python eval/analysis.py
+```
+
+The script looks for:
+
+```text
+eval/results_improved.json
+```
+
+Use the actual result path:
+
+```powershell
+python eval/analysis.py --results eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json
+```
+
+### `ModuleNotFoundError: No module named 'matplotlib'`
+
+Install dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+If needed, install plotting packages directly:
+
+```powershell
+python -m pip install matplotlib numpy
+```
+
+Verify:
+
+```powershell
+python -c "import matplotlib, numpy; print(matplotlib.__version__, numpy.__version__)"
+```
+
+### API key missing
+
+If the runner prints:
+
+```text
+ERROR: OPENROUTER_API_KEY not set in .env
+```
+
+Create `.env` in the repository root:
+
+```text
+OPENROUTER_API_KEY=your_key_here
+```
+
+### Rate limits or quota errors
+
+The runner saves progress after each completed layer-question pair. When quota resets, rerun the same command with `--resume`.
+
+Example:
+
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid --resume
+```
+
+To reduce cost:
+
+```powershell
+python eval/runner_improved.py --fast --limit 10 --no-mcts --no-hybrid --resume
+```
+
+### MCTS is expensive
+
+MCTS uses repeated expansion and rollout calls. Reduce iterations:
+
+```powershell
+python eval/runner_improved.py --limit 10 --mcts-iters 2
+```
+
+Or skip it:
+
+```powershell
+python eval/runner_improved.py --limit 10 --no-mcts
+```
+
+### Hybrid is expensive
+
+Hybrid runs Tree first, then multiple continuation chains. Skip it during development:
+
+```powershell
+python eval/runner_improved.py --limit 10 --no-hybrid
+```
+
+### Current confidence intervals look strange
+
+The statistical report uses a normal approximation and does not clamp bounds. With only 10 questions, intervals are wide and can exceed 100 percent. This is expected from the current implementation.
+
+For stronger statistical claims:
+
+- Run all 55 questions.
+- Repeat runs across seeds or temperatures.
+- Add Wilson intervals or bootstrap intervals.
+- Add pairwise tests such as McNemar for matched question-level comparisons.
+
+## Research Extensions
+
+High-value next steps:
+
+1. Save full layer internals in `runner_improved.py`.
+
+   Tree currently returns `tree_structure`, and Graph returns `graph`, but the runner only saves summary fields. Saving these structures would enable reasoning path visualization.
+
+2. Add reasoning path visualization.
+
+   For Tree, render nodes as candidate steps and edges as expansions. For Graph, render sub-question nodes with dependency edges.
+
+3. Improve confidence intervals.
+
+   Replace the current normal approximation with Wilson intervals or bootstrap intervals, and clamp displayed bounds to 0 to 100 percent.
+
+4. Add paired significance tests.
+
+   Since each layer answers the same questions, paired tests are more informative than independent accuracy intervals.
+
+5. Expand manual error analysis.
+
+   Read at least five failures per layer, label failure modes, and report which mechanisms fail most often.
+
+6. Add Pareto frontier labeling.
+
+   The current efficiency plot shows layer points. A future version could explicitly label dominated and non-dominated layers.
+
+7. Add per-question disagreement tables.
+
+   These are useful for finding questions where one reasoning strategy succeeds and others fail.
+
+8. Add evaluator audit mode.
+
+   Save predicted answer, expected answer, evaluator strategy, and evaluator reason in a compact CSV for manual review.
+
+## Quick Command Reference
+
+| Task | PowerShell command |
+|---|---|
+| Install dependencies | `python -m pip install -r requirements.txt` |
+| Validate project | `python test_phase1.py` |
+| Run demo | `python main.py` |
+| Run 10-question current setup | `python eval/runner_improved.py --limit 10 --no-mcts --no-hybrid --resume` |
+| Run all default layers | `python eval/runner_improved.py` |
+| Skip expensive layers | `python eval/runner_improved.py --no-mcts --no-hybrid` |
+| Use fast model | `python eval/runner_improved.py --fast --limit 10` |
+| Filter math | `python eval/runner_improved.py --category Math` |
+| Filter hard questions | `python eval/runner_improved.py --difficulty hard` |
+| Run analysis for current result | `python eval/analysis.py --results eval/results_gemini_meta_llama_llama_3_3_70b_instruct.json` |
+| List figures | `Get-ChildItem eval\figures` |
+
+## License and Notes
+
+This repository is structured as an academic and experimental research project. Keep `.env` private and do not commit API keys. The current result files are useful for local comparison, but larger runs are needed before making strong claims about layer superiority.
