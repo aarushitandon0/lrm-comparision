@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Evaluation outputs (regenerate locally)
+eval/results.json
+eval/results_*.json
+eval/results_improved_*.json
+
+# Generated figures (optional: remove line to commit plots)
+# eval/figures/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
