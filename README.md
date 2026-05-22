@@ -1,6 +1,6 @@
-# Reasoning Layer Evaluation Framework
+# EDI2 Reasoning Layer Evaluation Framework
 
-A research framework for comparing different reasoning strategies on the same language model, question set, evaluator, and analysis pipeline. The project wraps an OpenRouter chat model with multiple reasoning layers, runs controlled evaluations, saves structured JSON results, and generates publication-oriented visualizations.
+It is research framework for comparing different reasoning strategies on the same language model, question set, evaluator, and analysis pipeline. The project wraps an OpenRouter chat model with multiple reasoning layers, runs controlled evaluations, saves structured JSON results, and generates publication-oriented visualizations.
 
 The current codebase supports six reasoning layers:
 
@@ -329,6 +329,13 @@ The runner relies on the common return structure to collect tokens, calls, wall-
 
 ## Reasoning Layers
 
+This section explains the reasoning layers at two levels:
+
+- Simple explanation: what the layer is trying to do in plain language.
+- Technical explanation: the research mechanism behind the layer, without relying on code details.
+
+Each layer is a different way of controlling how the model thinks before it gives an answer. The model itself is still the same OpenRouter model. What changes is the structure around the model: whether it thinks once, thinks many times, explores branches, decomposes the problem, searches with rewards, or combines methods.
+
 ### Linear
 
 File:
@@ -346,6 +353,14 @@ enable_reflection = True
 ```
 
 Linear reasoning generates one step at a time. Each new prompt includes the question and all previously accepted steps.
+
+Simple explanation:
+
+Linear reasoning is the most direct strategy. It asks the model to solve the problem step by step in one continuous line. After each step, the layer checks whether the new step fits with the earlier steps. At the end, it asks the model to review its own work and correct the final answer if needed.
+
+Technical explanation:
+
+This layer is a sequential chain-of-thought controller with two verification mechanisms. The first mechanism is contradiction detection, where a new step is checked against the accumulated reasoning history. If the step conflicts with earlier reasoning, the layer backtracks and tries again with consistency guidance. The second mechanism is reflection, where the complete reasoning chain is reviewed before the final answer is accepted. The layer also estimates per-step confidence, which gives a rough internal signal for how reliable the reasoning path appears.
 
 For each generated step:
 
@@ -369,12 +384,14 @@ Strengths:
 - Simple and easy to inspect.
 - Lower cost than ensemble methods.
 - Reflection can catch some local mistakes.
+- Good baseline for measuring whether more complex reasoning layers actually help.
 
 Weaknesses:
 
 - Early mistakes can influence later steps.
 - Contradiction checking adds extra calls.
 - It explores only one reasoning path.
+- It can sound confident even when the first setup is wrong.
 
 ### Self-Consistent
 
@@ -392,6 +409,14 @@ OUTLIER_QUALITY_THRESHOLD = 3.0
 ```
 
 Self-Consistent reasoning generates multiple independent answers, scores each chain, removes low-quality outliers, clusters answer variants, and selects the strongest answer cluster.
+
+Simple explanation:
+
+Self-Consistent reasoning asks the model to solve the same question several times independently. Instead of trusting one answer, it compares the answers, groups similar ones together, and chooses the answer group with the strongest support. It is similar to asking several people to solve the same problem and choosing the most reliable consensus.
+
+Technical explanation:
+
+This layer is an ensemble method. It samples multiple reasoning trajectories from the same model, then performs answer extraction, quality scoring, outlier filtering, answer normalization, clustering, and weighted voting. The key idea is that individual generations may be noisy, but repeated independent generations can reveal a more stable answer. The weighted voting stage prevents a low-quality chain from counting as strongly as a coherent chain.
 
 Pipeline:
 
@@ -426,12 +451,14 @@ Strengths:
 - Reduces dependence on one sample.
 - Can recover when some chains fail.
 - Useful for math and short-answer questions where answer clustering is meaningful.
+- Provides a natural way to measure answer stability across samples.
 
 Weaknesses:
 
 - High token cost.
 - All chains can share the same misconception.
 - Requires answer extraction and clustering to behave well.
+- It is less useful when correct answers are long, open-ended, or hard to cluster.
 
 ### Tree
 
@@ -453,6 +480,14 @@ UCB_C = 1.41
 ```
 
 Tree reasoning explores multiple candidate next steps at each depth.
+
+Simple explanation:
+
+Tree reasoning does not follow only one path. At each point, it asks the model for several possible next steps, scores those options, keeps the strongest ones, and discards weaker ones. It is like exploring a few possible solution paths before deciding which path deserves more attention.
+
+Technical explanation:
+
+This layer is a beam-style search over reasoning states. A branch represents a partial reasoning path. At every depth, the layer expands active branches into multiple candidate continuations, assigns each continuation a model-based score, and keeps only the highest-scoring branches. This gives the system controlled exploration without allowing the number of branches to grow uncontrollably. The early-exit rule allows the layer to stop when a high-scoring branch already contains a final answer.
 
 Pipeline:
 
@@ -477,12 +512,14 @@ Strengths:
 - Explores alternatives rather than committing to one path.
 - Can prune weaker branches.
 - Provides branch-level scores for analysis.
+- Useful when there are multiple plausible solution routes.
 
 Weaknesses:
 
 - Branch generation and scoring are expensive.
 - LLM self-scoring can prefer plausible wrong steps.
 - The current runner saves final result metadata, not full branch structures.
+- If the scoring signal is weak, pruning can remove the correct path too early.
 
 ### Graph
 
@@ -499,6 +536,14 @@ MAX_NODES = 8
 ```
 
 Graph reasoning decomposes the original question into atomic sub-questions, infers dependencies between them, resolves the dependency graph, and checks consistency.
+
+Simple explanation:
+
+Graph reasoning breaks a problem into smaller questions. It then figures out which smaller questions must be answered first, solves them in order, and combines the answers to solve the original question. This is useful when a problem has several facts or calculations that depend on each other.
+
+Technical explanation:
+
+This layer treats reasoning as a dependency graph. Each node is an atomic sub-problem, and edges describe which sub-problems depend on earlier results. The layer performs decomposition, dependency inference, cycle handling, ordering, node resolution, final synthesis, and consistency validation. The goal is to make intermediate facts explicit and to prevent the model from mixing unresolved assumptions into the final answer.
 
 Pipeline:
 
@@ -528,12 +573,14 @@ Strengths:
 - Good fit for multi-hop reasoning.
 - Makes intermediate facts explicit.
 - Can identify dependency issues and re-resolve nodes.
+- Makes it easier to inspect where a complex answer came from.
 
 Weaknesses:
 
 - Dependency inference is itself model-generated.
 - Decomposition can introduce unnecessary or wrong sub-questions.
 - Current consistency validation is still an LLM judgment.
+- It can overcomplicate simple problems by creating unnecessary nodes.
 
 ### MCTS
 
@@ -555,6 +602,14 @@ expand_model = EVAL_MODEL
 ```
 
 MCTS stands for Monte Carlo Tree Search. This layer treats reasoning steps as nodes in a search tree.
+
+Simple explanation:
+
+MCTS reasoning repeatedly explores possible reasoning paths, gives each explored path a reward, and then spends more effort on paths that look promising while still occasionally exploring less-tested paths. It is a more formal search strategy than Tree reasoning.
+
+Technical explanation:
+
+This layer adapts Monte Carlo Tree Search to language reasoning. A node represents a partial reasoning state. The search alternates between selection, expansion, simulation, scoring, and backpropagation. Selection uses the UCB rule to balance exploitation of high-reward paths with exploration of under-tested paths. Simulation rolls a partial path forward until an answer is produced, and scoring estimates the quality of that rollout. Backpropagation updates the value estimates of all nodes along the selected path.
 
 Each iteration follows:
 
@@ -586,12 +641,14 @@ Strengths:
 - Formal exploration and exploitation mechanism.
 - Can use a cheaper model for rollout and expansion.
 - Produces useful search metadata.
+- Better suited than simple Tree search when repeated exploration is valuable.
 
 Weaknesses:
 
 - High cost as iterations increase.
 - Reward is still model-scored rather than ground-truth scored during inference.
 - Not included in the current 10-question saved run because it was skipped with `--no-mcts`.
+- Low-quality reward estimates can mislead the search.
 
 ### Hybrid
 
@@ -616,6 +673,14 @@ n_chains = 4
 ```
 
 Hybrid combines Tree and Self-Consistent reasoning.
+
+Simple explanation:
+
+Hybrid reasoning first uses Tree search to find a strong starting path, then uses Self-Consistent reasoning to generate several final answers from that path. It is designed to combine exploration with consensus.
+
+Technical explanation:
+
+This layer is a staged composition of two reasoning mechanisms. The Tree phase searches for a promising reasoning prefix. The voting phase then treats that prefix as shared context and generates multiple continuations. The final answer is selected through quality-weighted answer clustering. The purpose is to reduce the weaknesses of both parent methods: Tree search can find a structured direction, while self-consistency can reduce final-answer variance.
 
 Pipeline:
 
@@ -646,6 +711,61 @@ Weaknesses:
 - Usually the most expensive layer.
 - If the tree prefix is bad, all continuation chains inherit that context.
 - Not included in the current 10-question saved run because it was skipped with `--no-hybrid`.
+
+### Verifier-Guided
+
+Status:
+
+```text
+Proposed research layer, not currently implemented in the codebase.
+```
+
+Simple explanation:
+
+Verifier-Guided reasoning would separate solving from checking. One model pass would generate a candidate answer, and another verification process would test whether the answer actually follows from the problem. If the verification fails, the system would revise the solution and verify again before returning the final answer.
+
+Technical explanation:
+
+This layer would use a generator-verifier architecture. The generator produces a reasoning chain and candidate answer. The verifier evaluates the candidate against explicit criteria such as arithmetic validity, constraint satisfaction, premise coverage, contradiction checks, and final-answer format. A revision loop would continue until the verifier accepts the answer or a maximum number of attempts is reached. Unlike simple reflection, the verifier would be a separate stage with a structured checklist and a clear reject or accept decision.
+
+Expected pipeline:
+
+1. Generate an initial reasoning chain and answer.
+2. Extract the final answer and important intermediate claims.
+3. Verify whether each intermediate claim follows from the question.
+4. Verify whether calculations or logical transitions are valid.
+5. Verify whether the final answer satisfies the exact question asked.
+6. If verification fails, produce targeted feedback.
+7. Regenerate or revise only the flawed part of the reasoning.
+8. Return the answer only after verification passes or the retry budget is exhausted.
+
+Expected outputs:
+
+| Field | Meaning |
+|---|---|
+| `answer` | Final verified answer |
+| `verification_passed` | Whether the verifier accepted the final attempt |
+| `verification_notes` | Short explanation of accepted or rejected claims |
+| `revision_count` | Number of correction attempts |
+| `failed_checks` | Checklist items that failed during verification |
+
+Strengths:
+
+- Separates answer generation from answer validation.
+- Can catch arithmetic, constraint, and prompt-misreading errors.
+- Produces cleaner error analysis because failed checks are explicit.
+- Useful for high-stakes or multi-condition questions where correctness needs justification.
+
+Weaknesses:
+
+- Adds extra model calls.
+- The verifier can still be wrong if it relies only on LLM judgment.
+- Needs a well-designed checklist for each problem type.
+- May over-reject valid answers when formatting or wording differs.
+
+Why it would be useful for this project:
+
+The current layers often rely on the same model to both reason and self-score. A Verifier-Guided layer would make the checking step more explicit and structured. It would be especially useful for the current failure cases where the final answer is plausible but wrong, such as rate problems, probability problems, and multi-step arithmetic.
 
 ## Evaluation Pipeline
 
