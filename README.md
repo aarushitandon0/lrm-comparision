@@ -1,4 +1,4 @@
-# EDI2 Reasoning Layer Evaluation Framework
+# Reasoning Layer Evaluation Framework
 
 It is research framework for comparing different reasoning strategies on the same language model, question set, evaluator, and analysis pipeline. The project wraps an OpenRouter chat model with multiple reasoning layers, runs controlled evaluations, saves structured JSON results, and generates publication-oriented visualizations.
 
